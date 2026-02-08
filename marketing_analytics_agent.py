@@ -12,7 +12,7 @@ from typing import Dict, List, Tuple, Optional
 import json
 
 class MarketingAnalyticsAgent:
-    def __init__(self, project_id: str, dataset: str = 'analytics'):
+    def __init__(self, project_id: str, dataset: str = 'peerplay'):
         """Initialize the analytics agent"""
         self.client = bigquery.Client(project=project_id)
         self.dataset = dataset
@@ -57,18 +57,18 @@ class MarketingAnalyticsAgent:
         
         prev_date = check_date - timedelta(days=1)
         
-        # Get daily metrics
+        # Get daily metrics from ua_cohort table (actual spend data)
         query = f"""
         WITH daily_metrics AS (
             SELECT 
-                date,
-                source,
-                campaign_type,
+                install_date as date,
+                media_source as source,
+                platform as campaign_type,
                 SUM(installs) as installs,
-                SUM(spend) as spend,
-                AVG(cpi) as cpi
-            FROM `{self.project_id}.{self.dataset}.ua_daily_summary`
-            WHERE date IN ('{check_date}', '{prev_date}')
+                SUM(cost) as spend,
+                SAFE_DIVIDE(SUM(cost), SUM(installs)) as cpi
+            FROM `{self.project_id}.{self.dataset}.ua_cohort`
+            WHERE install_date IN ('{check_date}', '{prev_date}')
             GROUP BY 1, 2, 3
         ),
         current_day AS (
@@ -164,59 +164,41 @@ class MarketingAnalyticsAgent:
         week1_end = week2_start - timedelta(days=1)
         week1_start = week1_end - timedelta(days=6)
         
-        # Get cohort metrics at D7
+        # Get cohort metrics from ua_cohort table with actual data
         query = f"""
-        WITH cohort_installs AS (
+        WITH cohort_data AS (
             SELECT 
                 install_date,
-                source,
-                campaign_type,
+                media_source as source,
+                platform as campaign_type,
                 SUM(installs) as cohort_size,
-                SUM(spend) as cohort_spend,
-                AVG(cpi) as avg_cpi
-            FROM `{self.project_id}.{self.dataset}.ua_daily_summary`
+                SUM(cost) as cohort_spend,
+                SAFE_DIVIDE(SUM(cost), SUM(installs)) as avg_cpi,
+                AVG(d1_retention) as d1_retention,
+                AVG(d7_retention) as d7_retention,
+                AVG(d7_revenue) as d7_arpu,
+                AVG(ftd_rate) as d7_ftd_rate,
+                SAFE_DIVIDE(AVG(d7_revenue), SAFE_DIVIDE(SUM(cost), SUM(installs))) as d7_roas
+            FROM `{self.project_id}.{self.dataset}.ua_cohort`
             WHERE install_date BETWEEN '{week1_start}' AND '{week2_end}'
-            GROUP BY 1, 2, 3
-        ),
-        cohort_retention AS (
-            SELECT 
-                install_date,
-                source,
-                campaign_type,
-                AVG(CASE WHEN cohort_day = 1 THEN retention_rate END) as d1_retention,
-                AVG(CASE WHEN cohort_day = 7 THEN retention_rate END) as d7_retention
-            FROM `{self.project_id}.{self.dataset}.cohort_retention`
-            WHERE install_date BETWEEN '{week1_start}' AND '{week2_end}'
-            GROUP BY 1, 2, 3
-        ),
-        cohort_revenue AS (
-            SELECT 
-                install_date,
-                source,
-                campaign_type,
-                MAX(CASE WHEN cohort_day = 7 THEN cumulative_arpu END) as d7_arpu,
-                MAX(CASE WHEN cohort_day = 7 THEN ftd_rate END) as d7_ftd_rate
-            FROM `{self.project_id}.{self.dataset}.cohort_revenue`
-            WHERE install_date BETWEEN '{week1_start}' AND '{week2_end}'
+                AND installs > 0
             GROUP BY 1, 2, 3
         )
         SELECT 
-            i.install_date,
-            i.source,
-            i.campaign_type,
-            i.cohort_size,
-            i.cohort_spend,
-            i.avg_cpi,
-            r.d1_retention,
-            r.d7_retention,
-            rev.d7_arpu,
-            rev.d7_ftd_rate,
-            SAFE_DIVIDE(rev.d7_arpu, i.avg_cpi) as d7_roas
-        FROM cohort_installs i
-        LEFT JOIN cohort_retention r USING (install_date, source, campaign_type)
-        LEFT JOIN cohort_revenue rev USING (install_date, source, campaign_type)
-        WHERE i.cohort_size >= 10
-        ORDER BY i.install_date DESC
+            install_date,
+            source,
+            campaign_type,
+            cohort_size,
+            cohort_spend,
+            avg_cpi,
+            d1_retention,
+            d7_retention,
+            d7_arpu,
+            d7_ftd_rate,
+            d7_roas
+        FROM cohort_data
+        WHERE cohort_size >= 10
+        ORDER BY install_date DESC
         """
         
         df = self.client.query(query).to_dataframe()
@@ -296,59 +278,42 @@ class MarketingAnalyticsAgent:
         end_date = datetime.now().date()
         start_date = end_date - timedelta(weeks=lookback_weeks)
         
-        # Get weekly cohort performance
+        # Get weekly cohort performance from ua_cohort table
         query = f"""
         WITH weekly_cohorts AS (
             SELECT 
                 DATE_TRUNC(install_date, WEEK) as week_start,
-                source,
+                media_source as source,
                 SUM(installs) as installs,
-                SUM(spend) as spend,
-                AVG(cpi) as cpi
-            FROM `{self.project_id}.{self.dataset}.ua_daily_summary`
-            WHERE source = '{source}'
+                SUM(cost) as spend,
+                SAFE_DIVIDE(SUM(cost), SUM(installs)) as cpi,
+                AVG(d1_retention) as d1_retention,
+                AVG(d7_retention) as d7_retention,
+                AVG(d30_retention) as d30_retention,
+                AVG(d7_revenue) as d7_arpu,
+                AVG(d30_revenue) as d30_arpu,
+                SAFE_DIVIDE(AVG(d7_revenue), SAFE_DIVIDE(SUM(cost), SUM(installs))) as d7_roas,
+                SAFE_DIVIDE(AVG(d30_revenue), SAFE_DIVIDE(SUM(cost), SUM(installs))) as d30_roas
+            FROM `{self.project_id}.{self.dataset}.ua_cohort`
+            WHERE media_source = '{source}'
                 AND install_date >= '{start_date}'
-            GROUP BY 1, 2
-        ),
-        weekly_retention AS (
-            SELECT 
-                DATE_TRUNC(install_date, WEEK) as week_start,
-                source,
-                AVG(CASE WHEN cohort_day = 1 THEN retention_rate END) as d1_retention,
-                AVG(CASE WHEN cohort_day = 7 THEN retention_rate END) as d7_retention,
-                AVG(CASE WHEN cohort_day = 30 THEN retention_rate END) as d30_retention
-            FROM `{self.project_id}.{self.dataset}.cohort_retention`
-            WHERE source = '{source}'
-                AND install_date >= '{start_date}'
-            GROUP BY 1, 2
-        ),
-        weekly_revenue AS (
-            SELECT 
-                DATE_TRUNC(install_date, WEEK) as week_start,
-                source,
-                AVG(CASE WHEN cohort_day = 7 THEN cumulative_arpu END) as d7_arpu,
-                AVG(CASE WHEN cohort_day = 30 THEN cumulative_arpu END) as d30_arpu
-            FROM `{self.project_id}.{self.dataset}.cohort_revenue`
-            WHERE source = '{source}'
-                AND install_date >= '{start_date}'
+                AND installs > 0
             GROUP BY 1, 2
         )
         SELECT 
-            c.week_start,
-            c.installs,
-            c.spend,
-            c.cpi,
-            r.d1_retention,
-            r.d7_retention,
-            r.d30_retention,
-            rev.d7_arpu,
-            rev.d30_arpu,
-            SAFE_DIVIDE(rev.d7_arpu, c.cpi) as d7_roas,
-            SAFE_DIVIDE(rev.d30_arpu, c.cpi) as d30_roas
-        FROM weekly_cohorts c
-        LEFT JOIN weekly_retention r USING (week_start, source)
-        LEFT JOIN weekly_revenue rev USING (week_start, source)
-        ORDER BY c.week_start DESC
+            week_start,
+            installs,
+            spend,
+            cpi,
+            d1_retention,
+            d7_retention,
+            d30_retention,
+            d7_arpu,
+            d30_arpu,
+            d7_roas,
+            d30_roas
+        FROM weekly_cohorts
+        ORDER BY week_start DESC
         """
         
         df = self.client.query(query).to_dataframe()
@@ -393,19 +358,36 @@ class MarketingAnalyticsAgent:
         end_date = datetime.now().date()
         start_date = end_date - timedelta(days=lookback_days)
         
+        # Use ua_cohort table for offerwall analysis - filter by media sources that are typically offerwall
         query = f"""
+        WITH offerwall_sources AS (
+            SELECT 
+                media_source as source,
+                platform,
+                AVG(d3_retention) as chapter_1_cvr,
+                AVG(d7_retention) as chapter_3_cvr,
+                AVG(d14_retention) as chapter_5_cvr,
+                AVG(d7_revenue) as avg_revenue,
+                COUNT(*) as cohorts
+            FROM `{self.project_id}.{self.dataset}.ua_cohort`
+            WHERE install_date >= '{start_date}'
+                AND (LOWER(media_source) LIKE '%offer%' 
+                     OR LOWER(media_source) LIKE '%wall%'
+                     OR media_source IN ('adjoe', 'payback', 'almedia'))
+                AND installs > 0
+            GROUP BY 1, 2
+            HAVING COUNT(*) >= 5  -- Minimum cohorts for reliable data
+        )
         SELECT 
             source,
-            chapter,
-            SUM(users_started) as total_started,
-            SUM(users_completed) as total_completed,
-            SAFE_DIVIDE(SUM(users_completed), SUM(users_started)) as cvr,
-            AVG(avg_days_to_complete) as avg_days,
-            SUM(revenue_generated) as total_revenue
-        FROM `{self.project_id}.{self.dataset}.offerwall_chapters`
-        WHERE install_date >= '{start_date}'
-        GROUP BY 1, 2
-        ORDER BY 1, 2
+            platform,
+            chapter_1_cvr,
+            chapter_3_cvr, 
+            chapter_5_cvr,
+            avg_revenue,
+            cohorts
+        FROM offerwall_sources
+        ORDER BY source, platform
         """
         
         df = self.client.query(query).to_dataframe()
