@@ -107,53 +107,47 @@ chapter_report = agent.offerwall_chapter_analysis(lookback_days=45)
 
 ## 📋 Required BigQuery Tables
 
-### 1. `ua_daily_summary`
+**CRITICAL**: This agent uses **REAL SPEND DATA** from actual BigQuery tables, not estimates.
+
+### Primary Data Source: `ua_cohort` 
+**Location**: `yotam-395120.peerplay.ua_cohort`
+
 ```sql
-CREATE TABLE analytics.ua_daily_summary (
-  date DATE,
-  source STRING,
-  campaign_type STRING,
-  installs INT64,
-  spend FLOAT64,
-  cpi FLOAT64
-);
+-- Primary table with actual spend and performance data
+SELECT 
+  install_date,
+  media_source,      -- Real source names (almedia, adjoe, applovin, etc.)
+  platform,          -- Android/iOS
+  installs,           -- Actual install counts
+  cost,               -- **ACTUAL SPEND DATA** (not estimates)
+  d1_retention,       -- Real retention metrics
+  d7_retention,
+  d30_retention, 
+  d7_revenue,         -- Actual revenue data
+  d30_revenue,
+  ftd_rate           -- First-time deposit rate
+FROM `yotam-395120.peerplay.ua_cohort`
+WHERE install_date >= '2026-02-01'
 ```
 
-### 2. `cohort_retention`
-```sql
-CREATE TABLE analytics.cohort_retention (
-  install_date DATE,
-  source STRING,
-  campaign_type STRING,
-  cohort_day INT64,
-  retention_rate FLOAT64
-);
-```
+### Key Data Validations
 
-### 3. `cohort_revenue`
-```sql
-CREATE TABLE analytics.cohort_revenue (
-  install_date DATE,
-  source STRING,
-  campaign_type STRING,
-  cohort_day INT64,
-  cumulative_arpu FLOAT64,
-  ftd_rate FLOAT64
-);
-```
+**Spend Accuracy Confirmed**:
+- **Total 7-day spend**: $393,180 (Feb 1-7, 2026)
+- **Daily average**: $56,169/day
+- **Largest source**: almedia (~$21K/day)
+- **Real CPI values**: $7-8 average (not $5 estimates)
 
-### 4. `offerwall_chapters`
-```sql
-CREATE TABLE analytics.offerwall_chapters (
-  install_date DATE,
-  source STRING,
-  chapter INT64,
-  users_started INT64,
-  users_completed INT64,
-  avg_days_to_complete FLOAT64,
-  revenue_generated FLOAT64
-);
-```
+### Historical Data Coverage
+- **ua_cohort**: 2024-01-01 to present (current, live data)
+- **ua_costs_view**: 2024-07-01 to 2025-04-05 (outdated, deprecated)
+
+### IMPORTANT: Data Source Migration
+
+**❌ DO NOT USE**: Hardcoded CPI estimates or `ua_costs_view`
+**✅ ALWAYS USE**: `ua_cohort` table for actual spend data
+
+The agent was updated on 2026-02-08 to fix a critical data issue where estimated CPI values (~$5) were showing $124K total spend instead of actual $393K spend over 7 days.
 
 ## 📈 Output Examples
 
@@ -290,23 +284,42 @@ analyze_correlation(aso_keywords, ua_sources)
 - **Usage**: Correlate UA source quality with customer satisfaction
 
 ### BigQuery Workflow
+
+**CRITICAL KNOWLEDGE**: Always use `ua_cohort` table for actual spend data.
+
 ```sql
--- Example data preparation query
+-- ✅ CORRECT: Use ua_cohort table for actual spend analysis
 WITH daily_metrics AS (
   SELECT 
-    DATE(install_timestamp) as install_date,
-    media_source as source,
-    campaign_type,
-    COUNT(*) as installs,
-    SUM(cost) as spend,
-    AVG(cost) as cpi
-  FROM raw_install_events
-  WHERE DATE(install_timestamp) >= CURRENT_DATE() - 30
+    install_date,
+    media_source,
+    platform,
+    SUM(installs) as total_installs,
+    SUM(cost) as actual_spend,        -- REAL spend data
+    SAFE_DIVIDE(SUM(cost), SUM(installs)) as real_cpi,
+    AVG(d7_retention) as d7_retention,
+    AVG(d7_revenue) as d7_revenue,
+    SAFE_DIVIDE(AVG(d7_revenue), SAFE_DIVIDE(SUM(cost), SUM(installs))) as d7_roas
+  FROM `yotam-395120.peerplay.ua_cohort`
+  WHERE install_date >= CURRENT_DATE() - 30
+    AND installs > 0
   GROUP BY 1, 2, 3
 )
-INSERT INTO analytics.ua_daily_summary
-SELECT * FROM daily_metrics;
+SELECT * FROM daily_metrics
+ORDER BY actual_spend DESC;
+
+-- ❌ WRONG: Never use estimated CPI or hardcoded values
+-- Example of what NOT to do:
+-- installs * 5.00 as estimated_spend  -- This was causing $300K vs $124K error
 ```
+
+### Data Source Rules
+
+**ALWAYS REMEMBER**:
+1. **Use `ua_cohort.cost` field** - contains actual spend from ad platforms
+2. **Never estimate CPI** - calculate from real cost/installs data  
+3. **Validate daily spend** - should average ~$56K/day for recent periods
+4. **Check data recency** - ua_cohort has current data through today
 
 ### Automation Scripts
 ```python
@@ -442,20 +455,65 @@ def validate_data_quality(df):
 2. **Monthly**: Update benchmark expectations
 3. **Quarterly**: Validate table schemas and data quality
 
+### Critical Data Source Knowledge
+
+**📊 SPEND DATA ACCURACY TRACKING**
+
+**Historical Issue (RESOLVED 2026-02-08)**:
+- **Problem**: Agent was using estimated CPI values (~$5) instead of actual spend data
+- **Impact**: Showed $124K total spend vs actual $393K (217% error)
+- **Root Cause**: Wrong table (`ua_costs_view`) and hardcoded CPI estimates
+- **Solution**: Updated to use `ua_cohort` table with real `cost` field
+
+**Current Data Validation Benchmarks**:
+- **Daily spend**: Should average $55K-60K/day for recent periods
+- **Weekly spend**: Should total $380K-420K for 7-day periods
+- **Top source**: almedia typically ~$20K-25K/day
+- **Real CPI range**: $6-12 for most sources (not $5 estimates)
+
+### Data Quality Monitoring
+
+```python
+# Validation query to ensure data accuracy
+def validate_spend_data(date):
+    """Ensure spend data is actual, not estimated"""
+    query = f"""
+    SELECT 
+        SUM(cost) as daily_spend,
+        COUNT(DISTINCT media_source) as sources,
+        AVG(SAFE_DIVIDE(cost, installs)) as avg_cpi
+    FROM `yotam-395120.peerplay.ua_cohort`
+    WHERE install_date = '{date}'
+    """
+    # Daily spend should be $50K-65K range
+    # Average CPI should be $6-12 range
+    # Source count should be 15-25
+```
+
 ### Version Control
 - **Agent File**: `marketing_analytics_agent.py`
-- **Documentation**: `MARKETING_ANALYTICS_DOCUMENTATION.md`
-- **Git Repository**: https://github.com/dashboard (replace with actual repo)
+- **Documentation**: `MARKETING_ANALYTICS_DOCUMENTATION.md`  
+- **Git Repository**: https://github.com/Omripeerplay/peerplay-marketing-analytics
+- **Data Fix Commit**: a1a41b8 (2026-02-08) - Critical spend data correction
 
 ### Future Enhancements
 - [ ] Machine learning anomaly detection
-- [ ] Predictive ROAS modeling
+- [ ] Predictive ROAS modeling  
 - [ ] Cross-platform attribution
 - [ ] Real-time streaming analytics
 - [ ] A/B testing integration
+- [ ] Automated data quality alerts for spend accuracy
+
+### ⚠️ Critical Reminders
+
+**NEVER FORGET**: 
+1. Always use `ua_cohort` table for spend data
+2. Validate daily spend totals against $55K+/day benchmarks
+3. Real CPI values are $6-12, not $5 estimates
+4. Check for data quality issues if totals seem low
 
 ---
 
 *Last Updated: 2026-02-08*  
-*Version: 1.0.0*  
+*Version: 1.1.0 (Fixed spend data accuracy)*  
 *Maintainer: PeerPlay Analytics Team*

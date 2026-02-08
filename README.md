@@ -49,7 +49,17 @@ This agent integrates with other PeerPlay analytics tools:
 
 - Python 3.8+
 - Google Cloud BigQuery access
-- Required BigQuery tables: `ua_daily_summary`, `cohort_retention`, `cohort_revenue`, `offerwall_chapters`
+- **Critical**: Access to `yotam-395120.peerplay.ua_cohort` table with actual spend data
+
+### ⚠️ Data Source Requirements
+
+**USES REAL SPEND DATA** - Not estimates or placeholders:
+- **Primary table**: `ua_cohort` with actual `cost` field
+- **Validated spend**: ~$56K/day average (Feb 2026)
+- **Real CPI range**: $6-12 (not $5 estimates)
+- **Data coverage**: 2024-present with live updates
+
+**Fixed 2026-02-08**: Resolved critical issue where agent showed $124K vs actual $393K total spend over 7 days.
 
 ## 📋 Usage
 

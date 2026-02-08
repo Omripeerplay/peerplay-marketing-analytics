@@ -62,7 +62,7 @@ class MarketingAnalyticsAgent:
         WITH daily_metrics AS (
             SELECT 
                 install_date as date,
-                media_source as source,
+                mediasource as source,
                 platform as campaign_type,
                 SUM(installs) as installs,
                 SUM(cost) as spend,
@@ -169,16 +169,16 @@ class MarketingAnalyticsAgent:
         WITH cohort_data AS (
             SELECT 
                 install_date,
-                media_source as source,
+                mediasource as source,
                 platform as campaign_type,
                 SUM(installs) as cohort_size,
                 SUM(cost) as cohort_spend,
                 SAFE_DIVIDE(SUM(cost), SUM(installs)) as avg_cpi,
                 AVG(d1_retention) as d1_retention,
                 AVG(d7_retention) as d7_retention,
-                AVG(d7_revenue) as d7_arpu,
-                AVG(ftd_rate) as d7_ftd_rate,
-                SAFE_DIVIDE(AVG(d7_revenue), SAFE_DIVIDE(SUM(cost), SUM(installs))) as d7_roas
+                AVG(d7_total_net_revenue) as d7_arpu,
+                AVG(SAFE_DIVIDE(d7_ftds, installs)) as d7_ftd_rate,
+                SAFE_DIVIDE(AVG(d7_total_net_revenue), SAFE_DIVIDE(SUM(cost), SUM(installs))) as d7_roas
             FROM `{self.project_id}.{self.dataset}.ua_cohort`
             WHERE install_date BETWEEN '{week1_start}' AND '{week2_end}'
                 AND installs > 0
@@ -283,19 +283,19 @@ class MarketingAnalyticsAgent:
         WITH weekly_cohorts AS (
             SELECT 
                 DATE_TRUNC(install_date, WEEK) as week_start,
-                media_source as source,
+                mediasource as source,
                 SUM(installs) as installs,
                 SUM(cost) as spend,
                 SAFE_DIVIDE(SUM(cost), SUM(installs)) as cpi,
                 AVG(d1_retention) as d1_retention,
                 AVG(d7_retention) as d7_retention,
                 AVG(d30_retention) as d30_retention,
-                AVG(d7_revenue) as d7_arpu,
-                AVG(d30_revenue) as d30_arpu,
-                SAFE_DIVIDE(AVG(d7_revenue), SAFE_DIVIDE(SUM(cost), SUM(installs))) as d7_roas,
-                SAFE_DIVIDE(AVG(d30_revenue), SAFE_DIVIDE(SUM(cost), SUM(installs))) as d30_roas
+                AVG(d7_total_net_revenue) as d7_arpu,
+                AVG(d30_total_net_revenue) as d30_arpu,
+                SAFE_DIVIDE(AVG(d7_total_net_revenue), SAFE_DIVIDE(SUM(cost), SUM(installs))) as d7_roas,
+                SAFE_DIVIDE(AVG(d30_total_net_revenue), SAFE_DIVIDE(SUM(cost), SUM(installs))) as d30_roas
             FROM `{self.project_id}.{self.dataset}.ua_cohort`
-            WHERE media_source = '{source}'
+            WHERE mediasource = '{source}'
                 AND install_date >= '{start_date}'
                 AND installs > 0
             GROUP BY 1, 2
@@ -362,18 +362,18 @@ class MarketingAnalyticsAgent:
         query = f"""
         WITH offerwall_sources AS (
             SELECT 
-                media_source as source,
+                mediasource as source,
                 platform,
                 AVG(d3_retention) as chapter_1_cvr,
                 AVG(d7_retention) as chapter_3_cvr,
                 AVG(d14_retention) as chapter_5_cvr,
-                AVG(d7_revenue) as avg_revenue,
+                AVG(d7_total_net_revenue) as avg_revenue,
                 COUNT(*) as cohorts
             FROM `{self.project_id}.{self.dataset}.ua_cohort`
             WHERE install_date >= '{start_date}'
-                AND (LOWER(media_source) LIKE '%offer%' 
-                     OR LOWER(media_source) LIKE '%wall%'
-                     OR media_source IN ('adjoe', 'payback', 'almedia'))
+                AND (LOWER(mediasource) LIKE '%offer%' 
+                     OR LOWER(mediasource) LIKE '%wall%'
+                     OR mediasource IN ('adjoe', 'payback', 'almedia'))
                 AND installs > 0
             GROUP BY 1, 2
             HAVING COUNT(*) >= 5  -- Minimum cohorts for reliable data
