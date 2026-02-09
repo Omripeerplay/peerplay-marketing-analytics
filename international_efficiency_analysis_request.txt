@@ -1,0 +1,104 @@
+INTERNATIONAL PERFORMANCE EFFICIENCY ANALYSIS REQUEST
+Date: Feb 8, 2026
+
+ANALYSIS REQUIREMENTS:
+
+1. COUNTRY-LEVEL PERFORMANCE COMPARISON:
+   - All countries vs US benchmark 
+   - CPI efficiency by country (countries with CPI lower than US average)
+   - Volume and performance metrics by region
+
+2. MEDIA SOURCE PERFORMANCE BY COUNTRY:
+   - Which sources perform best in which countries
+   - CPI comparison: International vs US for each source
+   - Sources showing better efficiency outside US
+
+3. REGIONAL OPPORTUNITY ANALYSIS:
+   - Countries with both good volume AND efficiency
+   - Scaling potential by region/source combination
+   - Cost arbitrage opportunities
+
+QUERY STRUCTURE TO IMPLEMENT:
+
+WITH country_source_performance AS (
+  SELECT 
+    country,
+    mediasource,
+    SUM(cost) as spend,
+    SUM(installs) as installs,
+    SAFE_DIVIDE(SUM(cost), SUM(CASE WHEN installs > 0 THEN installs END)) as cpi,
+    SAFE_DIVIDE(SUM(d7_total_net_revenue), SUM(installs)) as d7_arpu,
+    SAFE_DIVIDE(SUM(d7_total_net_revenue), SUM(cost)) as d7_roas,
+    AVG(d7_retention_rate) as d7_retention,
+    COUNT(*) as cohorts
+  FROM `yotam-395120.peerplay.ua_cohort`
+  WHERE install_date = '2026-02-08'
+    AND cost > 0
+    AND country IS NOT NULL
+    AND country != 'Unknown'
+  GROUP BY country, mediasource
+  HAVING installs >= 10  -- Minimum volume threshold
+),
+us_benchmarks AS (
+  SELECT 
+    mediasource,
+    SAFE_DIVIDE(SUM(cost), SUM(CASE WHEN installs > 0 THEN installs END)) as us_cpi,
+    SAFE_DIVIDE(SUM(d7_total_net_revenue), SUM(cost)) as us_d7_roas,
+    AVG(d7_retention_rate) as us_d7_retention
+  FROM `yotam-395120.peerplay.ua_cohort`
+  WHERE install_date = '2026-02-08'
+    AND country = 'US'
+    AND cost > 0
+  GROUP BY mediasource
+),
+country_totals AS (
+  SELECT 
+    country,
+    SUM(spend) as total_spend,
+    SUM(installs) as total_installs,
+    SAFE_DIVIDE(SUM(spend), SUM(installs)) as avg_cpi,
+    SAFE_DIVIDE(SUM(spend * d7_roas), SUM(spend)) as weighted_d7_roas,
+    COUNT(DISTINCT mediasource) as source_count
+  FROM country_source_performance
+  GROUP BY country
+)
+SELECT 
+  csp.country,
+  csp.mediasource,
+  csp.spend,
+  csp.installs,
+  csp.cpi,
+  csp.d7_arpu,
+  csp.d7_roas,
+  csp.d7_retention,
+  ub.us_cpi,
+  ub.us_d7_roas,
+  ub.us_d7_retention,
+  SAFE_DIVIDE(csp.cpi - ub.us_cpi, ub.us_cpi) as cpi_vs_us_pct,
+  SAFE_DIVIDE(csp.d7_roas - ub.us_d7_roas, ub.us_d7_roas) as roas_vs_us_pct,
+  ct.total_spend as country_total_spend,
+  ct.avg_cpi as country_avg_cpi,
+  CASE 
+    WHEN csp.cpi < ub.us_cpi THEN 'Better than US'
+    WHEN csp.cpi < ub.us_cpi * 1.1 THEN 'Comparable to US'
+    ELSE 'More expensive than US'
+  END as efficiency_rating,
+  CASE 
+    WHEN csp.spend >= 500 AND csp.cpi < ub.us_cpi THEN 'High Priority Scaling'
+    WHEN csp.spend >= 200 AND csp.cpi < ub.us_cpi * 1.1 THEN 'Medium Priority'
+    WHEN csp.cpi < ub.us_cpi THEN 'Small Scale Test'
+    ELSE 'Monitor'
+  END as scaling_priority
+FROM country_source_performance csp
+LEFT JOIN us_benchmarks ub USING (mediasource)
+LEFT JOIN country_totals ct USING (country)
+WHERE csp.country != 'US' -- Focus on international markets
+ORDER BY 
+  CASE WHEN csp.cpi < ub.us_cpi THEN 1 ELSE 2 END, -- Efficient countries first
+  csp.spend DESC;
+
+FOCUS AREAS:
+- Countries showing both meaningful volume (>$500 spend) AND better CPI than US
+- Cost arbitrage opportunities 
+- Scaling potential by region/source combination
+- Export results to Google Sheets for dashboard creation
