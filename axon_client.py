@@ -275,12 +275,12 @@ def remove_creative_sets_from_all_campaigns(creative_set_ids: list[str]) -> dict
 def list_assets(ids: Optional[list[str]] = None,
                 resource_type: Optional[str] = None,
                 page: int = 1, size: int = 100) -> dict:
-    """List assets. resource_type: image, html, video."""
+    """List assets. resource_type: IMAGE, VIDEO, HTML (auto-uppercased)."""
     params = {"page": str(page), "size": str(size)}
     if ids:
         params["ids"] = ",".join(ids)
     if resource_type:
-        params["resource_type"] = resource_type
+        params["resource_type"] = resource_type.upper()
     return _request("GET", "asset/list", params=params)
 
 
