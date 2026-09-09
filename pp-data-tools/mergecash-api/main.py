@@ -2170,7 +2170,6 @@ def admin_stats(request: Request):
 
 # ── Internal endpoint (Cloud Scheduler) ─────────────────────────────
 
-@app.post("/api/internal/verify-all-progress")
 def _crossed_chapter_before_deadline(player_id: str, threshold_chapter: int, deadline: datetime) -> bool:
     """True if `player_id` crossed `threshold_chapter` at or before `deadline`, per vmp event_time.
     Factored out of verify_all_progress's original target_chapter-only inline check (2026-09-09) so
@@ -2198,6 +2197,7 @@ def _crossed_chapter_before_deadline(player_id: str, threshold_chapter: int, dea
     return False
 
 
+@app.post("/api/internal/verify-all-progress")
 def verify_all_progress(request: Request):
     """Periodic job: check milestone for all active users with fraud re-check."""
     require_internal(request)
