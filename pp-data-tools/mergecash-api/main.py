@@ -1065,8 +1065,13 @@ def signup(req: SignupRequest, request: Request):
     reward_amount = segment["reward_amount"]
     is_mergecoins = bool(segment.get("is_mergecoins"))
     checkpoint_chapter = segment.get("checkpoint_chapter")
+    # WHY rounded to the nearest $5, not the raw 54%: a plain `round(x, 2)` produces amounts like
+    # $27.00 or $16.20 for an Amazon Gift Card, which reads as an odd, arbitrary number rather than a
+    # deliberate reward (found via direct player-facing UI feedback, 2026-09-14). Every SEGMENT_BUCKETS
+    # reward_amount (10/20/30/40/50) is already a multiple of 5, so only the checkpoint's 54% needed
+    # rounding to match — nearest $5, never $0 (the smallest band, $10 * 0.54 = $5.4, rounds to $5).
     checkpoint_reward_amount = (
-        round(reward_amount * MERGECOINS_CHECKPOINT_PCT, 2) if checkpoint_chapter else None
+        float(round(reward_amount * MERGECOINS_CHECKPOINT_PCT / 5) * 5) if checkpoint_chapter else None
     )
 
     if current_chapter > target_chapter:
