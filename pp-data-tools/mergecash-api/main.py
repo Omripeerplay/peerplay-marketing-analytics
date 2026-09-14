@@ -1149,6 +1149,7 @@ def signup(req: SignupRequest, request: Request):
         "player_id": player_id,
         "target_chapter": target_chapter,
         "reward_amount": reward_amount,
+        "is_mergecoins": is_mergecoins,
         "checkpoint_chapter": checkpoint_chapter,
         "checkpoint_reward_amount": checkpoint_reward_amount,
         "status": "pending",
