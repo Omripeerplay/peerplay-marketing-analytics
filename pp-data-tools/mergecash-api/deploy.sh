@@ -126,6 +126,20 @@ SSO_AUD_ENV=$(/opt/homebrew/bin/gcloud run services describe mergecash-web --reg
 SSO_GW_SA_ENV="cloudrun-gateway-sa@${PROJECT}.iam.gserviceaccount.com"
 OIDC_ENV_PAIRS="||MERGECASH_SCHEDULER_SA=${SCHEDULER_SA_ENV}||MERGECASH_OIDC_AUDIENCE=${OIDC_AUD_ENV}||MERGECASH_SSO_AUDIENCE=${SSO_AUD_ENV}||MERGECASH_SSO_GATEWAY_SA=${SSO_GW_SA_ENV}||MERGECASH_SSO_DOMAIN=peerplay.com"
 
+# WHY --set-secrets/--update-secrets (native binding) for these 7 vars, not resolve-then-inject-as-
+# literal: the live service has carried them as native secretKeyRef bindings since the 2026-08-31
+# secret rotation (env var ROTATION_MARKER=slack-v3-... on the live revision) — gcloud refuses to
+# flip an env var's TYPE from secret-ref to literal via --update-env-vars, which is exactly what
+# broke this script on 2026-09-14 (discovered mid-deploy of unrelated MergeCoins work; the secret
+# binding itself was never broken, only this script's assumption about how it's delivered). Per the
+# auth-change protocol, that mismatch was worked around with an image-only `gcloud run services
+# update --image` (zero env/secret changes) rather than fixed in the same deploy — this is that fix,
+# applied separately and afterward. Secret NAMES below (including the three that differ from this
+# script's old names — helpscout-client-secret, sendgrid-api-key, aso-slack-bot-token) were verified
+# against the live service's actual `secretKeyRef` bindings via `gcloud run services describe
+# --format=json`, not guessed.
+SECRET_BINDINGS="MERGECASH_JWT_SECRET=mergecash-jwt-secret:latest,MERGECASH_INTERNAL_SECRET=mergecash-internal-secret:latest,RECAPTCHA_SECRET=mergecash-recaptcha-secret:latest,HELPSCOUT_APP_SECRET=mergecash-helpscout-app-secret:latest,SENDGRID_API_KEY=mergecash-sendgrid-api-key:latest,MERGECASH_SLACK_BOT_TOKEN=mergecash-slack-bot-token:latest,MERGECASH_MONITOR_BOT_TOKEN=mergecash-slack-bot-token:latest"
+
 if [ $BOOTSTRAP -eq 1 ] || ! /opt/homebrew/bin/gcloud run services describe "$SERVICE_NAME" --region="$REGION" --project="$PROJECT" >/dev/null 2>&1; then
   echo "  (bootstrap mode — setting VPC/ingress)"
   /opt/homebrew/bin/gcloud run deploy "$SERVICE_NAME" \
@@ -136,14 +150,16 @@ if [ $BOOTSTRAP -eq 1 ] || ! /opt/homebrew/bin/gcloud run services describe "$SE
     --ingress=internal-and-cloud-load-balancing \
     --network="$VPC_NETWORK" --subnet="$VPC_SUBNET" --vpc-egress=all-traffic \
     --memory 512Mi --cpu 1 --timeout 300 --max-instances 3 \
-    --set-env-vars "^||^GCP_PROJECT_ID=$PROJECT||CLOUD_RUN=true||MERGECASH_JWT_SECRET=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=mergecash-jwt-secret --project=$PROJECT)||MERGECASH_INTERNAL_SECRET=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=mergecash-internal-secret --project=$PROJECT)||RECAPTCHA_SECRET=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=mergecash-recaptcha-secret --project=$PROJECT 2>/dev/null || echo '')||MERGECASH_SLACK_WEBHOOK=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=mergecash-slack-webhook --project=$PROJECT 2>/dev/null || echo '')||MERGECASH_SLACK_BOT_TOKEN=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=aso-slack-bot-token --project=$PROJECT 2>/dev/null || echo '')||MERGECASH_SLACK_CHANNEL=C0B7KG75BRN||MERGECASH_MONITOR_BOT_TOKEN=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=aso-slack-bot-token --project=$PROJECT 2>/dev/null || echo '')||MERGECASH_ALERT_USER=U05V9L9K2QK||HELPSCOUT_APP_ID=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=helpscout-client-id --project=$PROJECT 2>/dev/null || echo '')||HELPSCOUT_APP_SECRET=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=helpscout-client-secret --project=$PROJECT 2>/dev/null || echo '')||HELPSCOUT_MAILBOX_ID=337204||SENDGRID_API_KEY=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=sendgrid-api-key --project=$PROJECT 2>/dev/null || echo '')${OIDC_ENV_PAIRS}" \
+    --set-secrets "$SECRET_BINDINGS" \
+    --set-env-vars "^||^GCP_PROJECT_ID=$PROJECT||CLOUD_RUN=true||MERGECASH_SLACK_WEBHOOK=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=mergecash-slack-webhook --project=$PROJECT 2>/dev/null || echo '')||MERGECASH_SLACK_CHANNEL=C0B7KG75BRN||MERGECASH_ALERT_USER=U05V9L9K2QK||HELPSCOUT_APP_ID=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=helpscout-client-id --project=$PROJECT 2>/dev/null || echo '')||HELPSCOUT_MAILBOX_ID=337204${OIDC_ENV_PAIRS}" \
     --quiet
 else
   # Update image + refresh secrets from Secret Manager on every deploy
   /opt/homebrew/bin/gcloud run services update "$SERVICE_NAME" \
     --image "$IMAGE" \
     --region "$REGION" --project "$PROJECT" \
-    --update-env-vars "^||^MERGECASH_JWT_SECRET=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=mergecash-jwt-secret --project=$PROJECT)||MERGECASH_INTERNAL_SECRET=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=mergecash-internal-secret --project=$PROJECT)||RECAPTCHA_SECRET=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=mergecash-recaptcha-secret --project=$PROJECT 2>/dev/null || echo '')||MERGECASH_SLACK_WEBHOOK=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=mergecash-slack-webhook --project=$PROJECT 2>/dev/null || echo '')||MERGECASH_SLACK_BOT_TOKEN=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=aso-slack-bot-token --project=$PROJECT 2>/dev/null || echo '')||MERGECASH_SLACK_CHANNEL=C0B7KG75BRN||MERGECASH_MONITOR_BOT_TOKEN=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=aso-slack-bot-token --project=$PROJECT 2>/dev/null || echo '')||MERGECASH_ALERT_USER=U05V9L9K2QK||HELPSCOUT_APP_ID=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=helpscout-client-id --project=$PROJECT 2>/dev/null || echo '')||HELPSCOUT_APP_SECRET=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=helpscout-client-secret --project=$PROJECT 2>/dev/null || echo '')||HELPSCOUT_MAILBOX_ID=337204||SENDGRID_API_KEY=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=sendgrid-api-key --project=$PROJECT 2>/dev/null || echo '')${OIDC_ENV_PAIRS}" \
+    --update-secrets "$SECRET_BINDINGS" \
+    --update-env-vars "^||^MERGECASH_SLACK_WEBHOOK=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=mergecash-slack-webhook --project=$PROJECT 2>/dev/null || echo '')||MERGECASH_SLACK_CHANNEL=C0B7KG75BRN||MERGECASH_ALERT_USER=U05V9L9K2QK||HELPSCOUT_APP_ID=$(/opt/homebrew/bin/gcloud secrets versions access latest --secret=helpscout-client-id --project=$PROJECT 2>/dev/null || echo '')||HELPSCOUT_MAILBOX_ID=337204${OIDC_ENV_PAIRS}" \
     --quiet
 fi
 
