@@ -163,7 +163,9 @@ else
     --quiet
 fi
 
-# Clean up
+# Clean up — cd out first: every command below runs after this point, and removing the
+# directory we're still sitting in makes the shell unable to resolve $PWD for the rest of the script.
+cd "$SCRIPT_DIR"
 rm -rf "$BUILD_DIR"
 
 # ── Always enforce ingress lockdown (prevents silent reopening) ────
