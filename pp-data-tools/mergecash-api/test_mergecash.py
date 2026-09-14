@@ -399,9 +399,29 @@ def test_frontend():
              "esc(targetCh)" in code or "esc(currentCh)" in code,
              "Chapter numbers should be escaped before DOM insertion")
 
-        test("Login mode disables player ID required",
-             "pidInput.required = false" in code or "required = false" in code,
-             "Player ID field should not be required in login mode")
+        # WHY not "pidInput.required = false"/"required = false" in app.js: that assumed a SHARED
+        # signup/login form whose Player ID field gets toggled required/not-required per mode. The
+        # modal was since redesigned to be login-ONLY (email address alone — see the WHY comment
+        # directly above <div id="auth-modal"> in index.html: "Login is email-only by design...
+        # there is no password field to look for"); signup now lives entirely in a separate inline
+        # hero form (#hero-signup-form) with its own Player ID field. There is no shared field left
+        # to toggle, so the old assertion could never pass again — it was failing for the CORRECT
+        # reason (the pattern it checked for no longer exists) but for the WRONG label (it read as a
+        # missing bug, not a completed, better redesign). Checking the actual current invariant
+        # instead: the login modal's form must contain no player-ID input at all.
+        auth_modal_html = ""
+        index_path = os.path.join(frontend_dir, "index.html")
+        if os.path.exists(index_path):
+            with open(index_path) as idxf:
+                idx_code = idxf.read()
+            if 'id="auth-modal"' in idx_code:
+                start = idx_code.index('id="auth-modal"')
+                end = idx_code.find("</div>\n</div>", start)
+                auth_modal_html = idx_code[start:end if end != -1 else start + 2000]
+        test("Login modal has no Player ID field (login is email-only by design)",
+             bool(auth_modal_html) and "player-id" not in auth_modal_html.lower()
+             and "player id" not in auth_modal_html.lower(),
+             "Login modal should only ask for email — Player ID belongs to the separate signup form")
 
     # 6.3 api.js security
     api_js = os.path.join(frontend_dir, "api.js")
@@ -578,8 +598,51 @@ def test_deploy():
         test("API deploy sets SENDGRID_API_KEY env var",
              "SENDGRID_API_KEY" in code)
 
-        test("Scheduler uses auth header",
-             "Authorization=Bearer" in code)
+        # WHY: these 7 vars are delivered to the live service as native Secret Manager bindings
+        # (secretKeyRef) since the 2026-08-31 rotation. If this script goes back to resolving them
+        # via `gcloud secrets versions access` and injecting the plaintext as a literal env var
+        # (--set-env-vars/--update-env-vars), gcloud refuses to change an existing env var's TYPE
+        # from secret-ref to literal — exactly the deploy failure hit on 2026-09-14. This guards
+        # against that regression recurring, e.g. if someone copies the old literal-injection
+        # pattern for a NEW secret without noticing the other 7 no longer work that way.
+        NATIVE_SECRET_VARS = [
+            "MERGECASH_JWT_SECRET", "MERGECASH_INTERNAL_SECRET", "RECAPTCHA_SECRET",
+            "HELPSCOUT_APP_SECRET", "SENDGRID_API_KEY", "MERGECASH_SLACK_BOT_TOKEN",
+            "MERGECASH_MONITOR_BOT_TOKEN",
+        ]
+        for var in NATIVE_SECRET_VARS:
+            test(f"{var} is bound via --set-secrets/--update-secrets, not literal injection",
+                 f"{var}=mergecash-" in code,
+                 f"{var} is not bound to a mergecash-* secret in a --set-secrets/--update-secrets "
+                 "argument — it may be resolved via `gcloud secrets versions access` and injected "
+                 "as a literal instead, which fails against the live service's secretKeyRef binding")
+        test("deploy.sh actually invokes --set-secrets/--update-secrets at least once",
+             "--set-secrets" in code and "--update-secrets" in code,
+             "Neither flag found — the 7 native-bound secrets above would have nowhere to attach")
+
+        # WHY not "Authorization=Bearer" in code: that string DOES appear in the file, but only
+        # inside a comment explaining why the scheduler jobs deliberately moved AWAY from it (a
+        # static bearer header leaked mergecash-internal-secret into transcripts twice, 2026-08-03/04)
+        # — the real, current mechanism is OIDC. A substring check against the file text can't tell
+        # a comment from code, so it was passing for the wrong reason: it would keep passing even if
+        # the OIDC flags were removed entirely (found 2026-09-14), and would start failing if someone
+        # simply deleted the historical WHY comment. Checking the actual OIDC flags, and that they
+        # appear on EVERY scheduler job (the inline verify-progress block plus the two
+        # create_internal_scheduler-driven jobs = 3 total), tests the real security property instead.
+        test("Scheduler jobs use OIDC auth (not a static bearer secret)",
+             "--oidc-service-account-email" in code and "--oidc-token-audience" in code,
+             "Missing OIDC auth flags — see the WHY comment above the scheduler section for why a "
+             "static Authorization: Bearer header must never be reintroduced here")
+        # WHY >= 2, not >= 3, for 3 scheduler jobs: verify-progress is created inline (1 occurrence),
+        # but health + 5xx-watch both go through the shared create_internal_scheduler() function, so
+        # its OIDC flags appear once in the source and apply to both calls at runtime — 2 source
+        # occurrences correctly covers all 3 jobs. (Caught by this test itself: an initial ">= 3"
+        # assumption double-counted the shared function as if it were inlined per job.)
+        test("OIDC auth is applied to every scheduler job path (inline verify-progress + the shared "
+             "create_internal_scheduler helper used by health/5xx-watch)",
+             code.count("--oidc-service-account-email") >= 2,
+             f"found {code.count('--oidc-service-account-email')} occurrences, expected >= 2 — "
+             "a job created without OIDC would be an unauthenticated internal endpoint")
 
     # Frontend deploy
     fe_deploy = os.path.expanduser("~/code/merge-cruise-offerwall/deploy.sh")
@@ -653,9 +716,25 @@ def test_pentest():
     # API endpoints behind IAP are tested via code analysis + browser.
     # These tests verify what we CAN reach without IAP: static files + headers.
 
+    # WHY allow_redirects=False + an explicit IAP-response check, instead of a plain requests.get():
+    # this gateway domain is behind Google IAP. An unauthenticated request gets a 302 to Google's own
+    # OAuth login page — and that login page itself returns 200 once the redirect is FOLLOWED, which
+    # is requests' default behavior. That silently defeated this exact guard: the whole section ran
+    # against Google's login page instead of skipping (found 2026-09-14 — every assertion below,
+    # including a false "referrer-policy missing" finding, was unknowingly checking Google's page,
+    # not this app's real nginx response, because `r.status_code == 200` was true for the WRONG page).
+    def _iap_intercepted(resp):
+        return resp.headers.get("x-goog-iap-generated-response") == "true" or (
+            resp.status_code in (302, 303) and "accounts.google.com" in resp.headers.get("location", "")
+        )
+
     try:
         import requests
-        r = requests.get(f"{BASE}/health", timeout=15)
+        r = requests.get(f"{BASE}/health", timeout=15, allow_redirects=False)
+        if _iap_intercepted(r):
+            skip("Penetration tests", "Blocked by Google IAP — requires an authenticated VPN "
+                                       "session to reach the real app, not just network reachability")
+            return
         if r.status_code != 200:
             skip("Penetration tests", f"Cannot reach: {r.status_code}")
             return
@@ -697,19 +776,28 @@ def test_pentest():
             skip(f"Path test: {path}", "Request failed")
 
     # 11.3 Security headers present on static pages
+    # WHY a fresh IAP check here too: this is a SEPARATE request from the /health guard above, and
+    # was following redirects (the default), so it could independently land on Google's IAP login
+    # page even when /health happened to be reachable — the exact failure mode this whole function
+    # exists to avoid. Fall back once without redirects to positively identify a real nginx response
+    # before trusting any header (or its absence) as this app's own.
     try:
-        r = requests.get(f"{BASE}/", timeout=10)
-        headers = {k.lower(): v for k, v in r.headers.items()}
+        r = requests.get(f"{BASE}/", timeout=10, allow_redirects=False)
+        if _iap_intercepted(r):
+            skip("Security header tests", "Blocked by Google IAP — cannot verify this app's real "
+                                           "response headers without an authenticated VPN session")
+        else:
+            headers = {k.lower(): v for k, v in r.headers.items()}
 
-        for header_name in ["x-content-type-options", "x-frame-options", "content-security-policy",
-                            "referrer-policy", "strict-transport-security"]:
-            test(f"Response header present: {header_name}",
-                 header_name in headers,
-                 f"Missing {header_name} header")
+            for header_name in ["x-content-type-options", "x-frame-options", "content-security-policy",
+                                "referrer-policy", "strict-transport-security"]:
+                test(f"Response header present: {header_name}",
+                     header_name in headers,
+                     f"Missing {header_name} header")
 
-        test("Server header doesn't expose version",
-             "nginx/" not in headers.get("server", ""),
-             f"Server: {headers.get('server', 'not set')}")
+            test("Server header doesn't expose version",
+                 "nginx/" not in headers.get("server", ""),
+                 f"Server: {headers.get('server', 'not set')}")
     except Exception:
         skip("Security header tests", "Cannot reach static pages")
 
@@ -771,18 +859,23 @@ def test_cloud_run():
                  var in env_output,
                  f"{var} not found in deployed env vars")
 
-        # Check that env vars have values (not empty)
+        # Check that env vars have values (not empty) — accepts EITHER a literal value OR a native
+        # Secret Manager binding (valueFrom.secretKeyRef). WHY both: these vars have been delivered
+        # via secretKeyRef since the 2026-08-31 secret rotation, not as literals — a check for
+        # `value` alone reports them as "empty" even though they're correctly configured (found
+        # 2026-09-14, same root confusion that had broken deploy.sh since that rotation).
         import yaml
         try:
             parsed = yaml.safe_load(env_output)
             envs = parsed.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [{}])[0].get("env", [])
             for env in envs:
                 name = env.get("name", "")
-                value = env.get("value", "")
                 if name in ["MERGECASH_JWT_SECRET", "MERGECASH_INTERNAL_SECRET", "SENDGRID_API_KEY"]:
+                    has_literal_value = bool(env.get("value", ""))
+                    has_secret_ref = bool((env.get("valueFrom") or {}).get("secretKeyRef"))
                     test(f"Cloud Run env var has value: {name}",
-                         bool(value),
-                         f"{name} is empty — secrets not loaded")
+                         has_literal_value or has_secret_ref,
+                         f"{name} is neither a literal value nor a Secret Manager reference — secret not loaded")
         except Exception:
             pass  # YAML parsing optional, main checks above are sufficient
 
@@ -898,6 +991,93 @@ def test_business_logic():
          "Each segment should have its own time limit")
 
 
+# ── 14. ROUTE REGISTRATION INTEGRITY ──────────────────────────────────
+# WHY this section exists: on 2026-09-09, factoring _crossed_chapter_before_deadline() out of
+# verify_all_progress() left the @app.post("/api/internal/verify-all-progress") decorator stranded
+# above the new helper instead of the function it was meant to decorate — a Python decorator binds to
+# the very next `def`, so this is syntactically valid and silently WRONG. Two consequences: the real
+# 4h completion scheduler was never registered as a route (Cloud Scheduler would 422 against it
+# forever), and the helper became an unauthenticated route instead (a BQ-backed oracle with no auth).
+# Caught by a pr-reviewer pass reading the file directly, NOT by the isolated unit tests — those
+# extract pure function bodies via ast and never touch the real @app.get/@app.post wiring at all. This
+# section closes that structural blind spot: it maps every expected endpoint to the function name it
+# MUST decorate, using ast (so it reflects the actual current binding, not a hand-copied guess).
+
+def test_routes():
+    section("14. ROUTE REGISTRATION INTEGRITY")
+
+    main_path = os.path.join(os.path.dirname(__file__), 'main.py')
+    if not os.path.exists(main_path):
+        skip("Route registration tests", "main.py not found")
+        return
+
+    import ast
+    source = open(main_path).read()
+    tree = ast.parse(source)
+
+    # Every /api/... endpoint that should exist, mapped to the exact function name that must be
+    # decorated. If a decorator ever gets separated from its intended function, this fails loudly
+    # instead of silently shipping a broken or unauthenticated route.
+    EXPECTED_ROUTES = {
+        "/health": "health",
+        "/api/signup": "signup",
+        "/api/verify-email": "verify_email",
+        "/api/resend-code": "resend_verification_code",
+        "/api/login": "login",
+        "/api/dashboard": "dashboard",
+        "/api/check-progress": "check_progress",
+        "/api/contact": "contact",
+        "/api/admin/rewards": "list_rewards",
+        "/api/admin/rewards/{reward_id}/fulfill": "fulfill_reward",
+        "/api/admin/rewards/{reward_id}/deny": "deny_reward",
+        "/api/admin/rewards/{reward_id}/notes": "update_reward_notes",
+        "/api/admin/users": "list_users",
+        "/api/admin/view-as-user": "admin_view_as_user",
+        "/api/admin/stats": "admin_stats",
+        "/api/internal/verify-all-progress": "verify_all_progress",
+        "/api/internal/mergecash-5xx-watch": "mergecash_5xx_watch",
+        "/api/internal/mergecash-health": "mergecash_health",
+    }
+
+    found_routes = {}
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for dec in node.decorator_list:
+            if (isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute)
+                    and dec.func.attr in ("get", "post")
+                    and isinstance(dec.func.value, ast.Name) and dec.func.value.id == "app"
+                    and dec.args and isinstance(dec.args[0], ast.Constant)):
+                found_routes[dec.args[0].value] = node.name
+
+    for path, expected_fn in EXPECTED_ROUTES.items():
+        actual_fn = found_routes.get(path)
+        test(f"route {path} -> {expected_fn}()",
+             actual_fn == expected_fn,
+             f"decorator binds to {actual_fn}() instead — stranded/misplaced decorator" if actual_fn
+             else "route is not registered at all — decorator missing or misplaced")
+
+    extra = set(found_routes) - set(EXPECTED_ROUTES)
+    test("no unexpected/undocumented routes exist beyond EXPECTED_ROUTES",
+         not extra,
+         f"found undocumented routes: {extra} — add them to EXPECTED_ROUTES or investigate")
+
+    # Every /api/internal/* route is meant to be Cloud-Scheduler-only — require_internal() is the
+    # entire auth gate for it. A route that's missing this call (whether from a fresh bug or the same
+    # class of stranded-decorator mistake) is a live unauthenticated internal endpoint.
+    internal_paths = {p: fn for p, fn in EXPECTED_ROUTES.items() if p.startswith("/api/internal/")}
+    for path, fn_name in internal_paths.items():
+        fn_node = next((n for n in tree.body
+                         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fn_name),
+                        None)
+        if fn_node is None:
+            continue  # already reported as missing above
+        fn_source = ast.get_source_segment(source, fn_node) or ""
+        test(f"{fn_name}() ({path}) calls require_internal()",
+             "require_internal(" in fn_source,
+             "internal endpoint is missing its auth gate — would be reachable with no authentication")
+
+
 # ── MAIN ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -924,6 +1104,7 @@ if __name__ == "__main__":
         "pentest": test_pentest,
         "cloudrun": test_cloud_run,
         "logic": test_business_logic,
+        "routes": test_routes,
     }
 
     if args.section:
