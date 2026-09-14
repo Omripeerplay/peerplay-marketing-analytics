@@ -319,11 +319,55 @@ def test_payout_decision_tree():
          decide_verify_all_progress(80, 89, None, is_overdue=True) == "expired")
 
 
+# ── 5. signup() writer parity — user doc vs milestone doc ──────────────────
+
+def test_signup_milestone_field_parity():
+    section("5. signup() writer parity — user doc vs milestone doc")
+    # WHY this test exists: signup() writes the same MergeCoins fields to TWO places (the user doc
+    # and the milestone subcollection doc) as two separate dict literals in two separate .set() calls.
+    # On 2026-09-14, a real end-to-end signup against the live service showed the checkpoint/target
+    # dashboard silently falling back to the legacy single-milestone view — traced to the milestone
+    # doc's dict literal missing `is_mergecoins` (present on the user doc's dict literal, a few lines
+    # above). build_mergecoins_payload()'s own guard (`not milestone.get("is_mergecoins")`) was
+    # correctly written and correctly TESTED in isolation — but that test only ever fed it a complete,
+    # hand-built dict. No test ever asked "does the real signup() function actually WRITE a consistent
+    # dict" — a writer/reader parity gap a unit test of the reader alone can never catch. This test
+    # closes that gap by inspecting every dict literal passed to a Firestore .set() call inside
+    # signup() and asserting they all agree on the MergeCoins field set.
+    signup_fn = next(n for n in TREE.body
+                      if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "signup")
+
+    MERGECOINS_KEYS = {"is_mergecoins", "checkpoint_chapter", "checkpoint_reward_amount"}
+    set_call_key_sets = []
+    for node in ast.walk(signup_fn):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "set" and node.args and isinstance(node.args[0], ast.Dict)):
+            keys = {k.value for k in node.args[0].keys if isinstance(k, ast.Constant)}
+            # Only dicts already carrying at least one MergeCoins key are in scope — signup() also
+            # .set()s an unrelated verification-code update that has nothing to do with MergeCoins.
+            if keys & MERGECOINS_KEYS:
+                set_call_key_sets.append(keys)
+
+    test("signup() writes at least 2 MergeCoins-bearing .set() calls (user doc + milestone doc)",
+         len(set_call_key_sets) >= 2,
+         f"found {len(set_call_key_sets)} — expected the user doc and the milestone subcollection "
+         "doc to both carry MergeCoins fields")
+
+    for i, keys in enumerate(set_call_key_sets):
+        missing = MERGECOINS_KEYS - keys
+        test(f"signup() .set() call #{i + 1} has all 3 MergeCoins keys, not a partial subset",
+             not missing,
+             f"missing {missing} — a partial write here is exactly the 2026-09-14 bug "
+             "(checkpoint_chapter present, is_mergecoins missing, dashboard silently falls back "
+             "to the legacy single-milestone view even though the milestone IS a real MergeCoins one)")
+
+
 if __name__ == "__main__":
     test_segment_reward()
     test_build_mergecoins_payload()
     test_crossed_chapter_before_deadline()
     test_payout_decision_tree()
+    test_signup_milestone_field_parity()
 
     print(f"\n{'=' * 60}")
     print(f"  RESULTS: {PASS} passed, {FAIL} failed")
