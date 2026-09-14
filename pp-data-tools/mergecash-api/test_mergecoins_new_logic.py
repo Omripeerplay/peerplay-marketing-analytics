@@ -88,11 +88,12 @@ NAMESPACE = {
     "bq_param": lambda name, typ, val: (name, typ, val),
 }
 
-for _name in ("SEGMENT_BUCKETS", "mergecoins_segment_reward", "_crossed_chapter_before_deadline",
-              "build_mergecoins_payload"):
+for _name in ("SEGMENT_BUCKETS", "MERGECOINS_CHECKPOINT_PCT", "mergecoins_segment_reward",
+              "_crossed_chapter_before_deadline", "build_mergecoins_payload"):
     exec(compile(_extract(_name), MAIN_PY, "exec"), NAMESPACE)
 
 SEGMENT_BUCKETS = NAMESPACE["SEGMENT_BUCKETS"]
+MERGECOINS_CHECKPOINT_PCT = NAMESPACE["MERGECOINS_CHECKPOINT_PCT"]
 mergecoins_segment_reward = NAMESPACE["mergecoins_segment_reward"]
 _crossed_chapter_before_deadline = NAMESPACE["_crossed_chapter_before_deadline"]
 build_mergecoins_payload = NAMESPACE["build_mergecoins_payload"]
@@ -362,12 +363,44 @@ def test_signup_milestone_field_parity():
              "to the legacy single-milestone view even though the milestone IS a real MergeCoins one)")
 
 
+# ── 6. checkpoint_reward_amount rounding ────────────────────────────────────
+# Mirrors signup()'s inline formula (main.py, ~line 1068): float(round(reward_amount *
+# MERGECOINS_CHECKPOINT_PCT / 5) * 5). Not extracted via ast like the standalone functions above,
+# since it's a local expression inside signup(), not its own def — this mirror is written by reading
+# the real line, same caveat as the payout decision-tree mirrors elsewhere in this file.
+def checkpoint_reward_for(reward_amount):
+    return float(round(reward_amount * MERGECOINS_CHECKPOINT_PCT / 5) * 5)
+
+
+def test_checkpoint_reward_rounding():
+    section("6. checkpoint_reward_amount — rounded to the nearest $5")
+    # WHY this matters: a plain round(x, 2) produced $27.00/$16.20-style amounts for an Amazon Gift
+    # Card, which reads as arbitrary rather than deliberate — found via direct player-facing feedback
+    # on the live dashboard, 2026-09-14. Verified against every real reward_amount in SEGMENT_BUCKETS,
+    # not just one example, since the fix must hold for all 8 bands, not just the one that was seen.
+    expected = {10: 5.0, 20: 10.0, 30: 15.0, 40: 20.0, 50: 25.0}
+    real_rewards = {reward for _lo, _hi, _old_target, _seg_id, reward in SEGMENT_BUCKETS}
+    test("SEGMENT_BUCKETS' real reward amounts match the hand-picked set this test covers",
+         real_rewards == set(expected), f"got {sorted(real_rewards)}, expected {sorted(expected)}")
+
+    for reward_amount, expected_checkpoint in expected.items():
+        actual = checkpoint_reward_for(reward_amount)
+        test(f"${reward_amount} full reward -> ${expected_checkpoint:.0f} checkpoint (not "
+             f"${reward_amount * MERGECOINS_CHECKPOINT_PCT:.2f})",
+             actual == expected_checkpoint, f"got {actual}")
+        test(f"${reward_amount} checkpoint reward is a whole multiple of 5",
+             actual % 5 == 0, f"got {actual}")
+        test(f"${reward_amount} checkpoint reward is never $0 (a real, non-trivial bonus)",
+             actual > 0, f"got {actual}")
+
+
 if __name__ == "__main__":
     test_segment_reward()
     test_build_mergecoins_payload()
     test_crossed_chapter_before_deadline()
     test_payout_decision_tree()
     test_signup_milestone_field_parity()
+    test_checkpoint_reward_rounding()
 
     print(f"\n{'=' * 60}")
     print(f"  RESULTS: {PASS} passed, {FAIL} failed")
