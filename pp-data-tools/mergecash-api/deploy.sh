@@ -19,7 +19,12 @@ PROJECT="yotam-395120"
 VPC_NETWORK="internal"
 VPC_SUBNET="internal-egress"
 GATEWAY_DOMAIN="internal.peerplay.dev"
-SERVICE_ACCOUNT="bigquery-alerts-to-slack@yotam-395120.iam.gserviceaccount.com"
+# WHY this is the dedicated SA and not the shared bigquery-alerts-to-slack@ it used to name: the
+# live service was moved to mergecash-api-rt@ at revision 00121 (2026-08-31) as a least-privilege
+# fix, but this constant was never updated with it. It is read ONLY by the bootstrap branch below,
+# so a normal redeploy never noticed -- but `./deploy.sh --bootstrap`, or recreating the service,
+# would have silently put a public-facing API back on the shared automation identity.
+SERVICE_ACCOUNT="mergecash-api-rt@yotam-395120.iam.gserviceaccount.com"
 IMAGE="us-central1-docker.pkg.dev/${PROJECT}/cloud-run-source-deploy/${SERVICE_NAME}:latest"
 
 BOOTSTRAP=0
@@ -174,6 +179,19 @@ echo "→ Enforcing ingress=internal-and-cloud-load-balancing..."
   --region "$REGION" --project "$PROJECT" \
   --ingress=internal-and-cloud-load-balancing \
   --quiet 2>/dev/null || true
+
+# -- Always enforce the dedicated service account (prevents silent reversion) ----
+# WHY unconditional rather than only in the bootstrap branch above: the normal redeploy path is
+# `gcloud run services update`, which leaves the existing identity untouched. That is why the stale
+# constant above went unnoticed for weeks -- the value was wrong but nothing ever applied it.
+# Enforcing it on every run makes the committed value and the live identity the same fact.
+# WHY no `|| true`, unlike the ingress line: a public API running as the wrong identity is the
+# defect this guards. Failing loudly is the point.
+echo "-> Enforcing service account=$SERVICE_ACCOUNT ..."
+/opt/homebrew/bin/gcloud run services update "$SERVICE_NAME" \
+  --region "$REGION" --project "$PROJECT" \
+  --service-account "$SERVICE_ACCOUNT" \
+  --quiet
 
 SERVICE_URL=$(/opt/homebrew/bin/gcloud run services describe "$SERVICE_NAME" --region="$REGION" --project="$PROJECT" --format="value(status.url)")
 GATEWAY_URL="https://${SERVICE_NAME}.yotam.${GATEWAY_DOMAIN}"
