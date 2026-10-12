@@ -89,7 +89,8 @@ NAMESPACE = {
 }
 
 for _name in ("SEGMENT_BUCKETS", "MERGECOINS_CHECKPOINT_PCT", "mergecoins_segment_reward",
-              "_crossed_chapter_before_deadline", "build_mergecoins_payload"):
+              "_crossed_chapter_before_deadline", "build_mergecoins_payload",
+              "OW_ATTRIBUTION_WINDOWS", "OW_SOURCE_ALIASES", "ow_source_key"):
     exec(compile(_extract(_name), MAIN_PY, "exec"), NAMESPACE)
 
 SEGMENT_BUCKETS = NAMESPACE["SEGMENT_BUCKETS"]
@@ -97,6 +98,9 @@ MERGECOINS_CHECKPOINT_PCT = NAMESPACE["MERGECOINS_CHECKPOINT_PCT"]
 mergecoins_segment_reward = NAMESPACE["mergecoins_segment_reward"]
 _crossed_chapter_before_deadline = NAMESPACE["_crossed_chapter_before_deadline"]
 build_mergecoins_payload = NAMESPACE["build_mergecoins_payload"]
+OW_ATTRIBUTION_WINDOWS = NAMESPACE["OW_ATTRIBUTION_WINDOWS"]
+OW_SOURCE_ALIASES = NAMESPACE["OW_SOURCE_ALIASES"]
+ow_source_key = NAMESPACE["ow_source_key"]
 
 
 # ── 1. mergecoins_segment_reward ────────────────────────────────────────────
@@ -394,6 +398,27 @@ def test_checkpoint_reward_rounding():
              actual > 0, f"got {actual}")
 
 
+# ── 7. ow_source_key ─────────────────────────────────────────────────────────
+
+def test_ow_source_key():
+    section("7. ow_source_key — dim_player spelling -> attribution-window key")
+
+    # The real first_mediasource spellings that missed the exact-match lookup (measured 2026-10-12).
+    for raw, key in (("adwake_rewards", "adwake rewards"), ("tyrads_new", "tyrads new"),
+                     ("fluent, llc", "fluent"), ("Snakzy", "snakzy")):
+        got = ow_source_key(raw)
+        test(f"{raw!r} -> {key!r}", got == key, f"got {got!r}")
+
+    test("exact keys still resolve to themselves",
+         all(ow_source_key(k) == k for k in OW_ATTRIBUTION_WINDOWS))
+    test("case and surrounding whitespace are ignored", ow_source_key("  AlMedia ") == "almedia")
+    test("every alias points at a real window key",
+         all(v in OW_ATTRIBUTION_WINDOWS for v in OW_SOURCE_ALIASES.values()),
+         str({k: v for k, v in OW_SOURCE_ALIASES.items() if v not in OW_ATTRIBUTION_WINDOWS}))
+    for raw in ("organic", "facebook", "", None):
+        test(f"non-offerwall source {raw!r} -> None", ow_source_key(raw) is None)
+
+
 if __name__ == "__main__":
     test_segment_reward()
     test_build_mergecoins_payload()
@@ -401,6 +426,7 @@ if __name__ == "__main__":
     test_payout_decision_tree()
     test_signup_milestone_field_parity()
     test_checkpoint_reward_rounding()
+    test_ow_source_key()
 
     print(f"\n{'=' * 60}")
     print(f"  RESULTS: {PASS} passed, {FAIL} failed")

@@ -427,7 +427,27 @@ OW_ATTRIBUTION_WINDOWS = {
     "vybs": 30, "payback": 90, "app samurai": 60, "ayet-studios": 30,
     "maf": 30, "mega fortuna": 30, "mistplay": 45, "playvault": 30,
     "playback rewards": 60, "adwake rewards": 60, "versemedia": 60,
+    # WHY 30: Snakzy is a CPI deal with no contracted window; 30 matches the dashboard's
+    # get_ow_window() default, which is what it is graded on today.
+    "snakzy": 30,
 }
+# dim_player.first_mediasource spellings that differ from the keys above (measured 2026-10-12).
+# WHY: an exact-match miss silently drops the player from MergeCoins with no error — adwake_rewards
+# alone had 1,023 installs that could never qualify.
+OW_SOURCE_ALIASES = {
+    "adwake_rewards": "adwake rewards",
+    "tyrads_new": "tyrads new",
+    "fluent, llc": "fluent",
+}
+
+
+def ow_source_key(source: Optional[str]) -> Optional[str]:
+    """Normalise a dim_player first_mediasource to its OW_ATTRIBUTION_WINDOWS key, or None."""
+    if not source:
+        return None
+    s = source.strip().lower()
+    s = OW_SOURCE_ALIASES.get(s, s)
+    return s if s in OW_ATTRIBUTION_WINDOWS else None
 # WHY almedia is special-cased: its window changed 60d -> 90d on 2026-07-16 (OW_WINDOW_TIMELINE in
 # the dashboard). Installs before the change keep the window that was actually in force at the time.
 _ALMEDIA_WINDOW_CHANGE_DATE = date(2026, 7, 16)
@@ -497,10 +517,11 @@ def check_mergecoins_eligibility(player_id: str) -> Optional[dict]:
         """, [bq_param("pid", "STRING", player_id)])
 
         for r in rows:
-            if r.is_fraud or r.source not in OW_ATTRIBUTION_WINDOWS or not r.install_date or not r.last_event_time:
+            source = ow_source_key(r.source)
+            if r.is_fraud or not source or not r.install_date or not r.last_event_time:
                 break
-            window_days = OW_ATTRIBUTION_WINDOWS[r.source]
-            if r.source == "almedia" and r.install_date < _ALMEDIA_WINDOW_CHANGE_DATE:
+            window_days = OW_ATTRIBUTION_WINDOWS[source]
+            if source == "almedia" and r.install_date < _ALMEDIA_WINDOW_CHANGE_DATE:
                 window_days = _ALMEDIA_PRE_CHANGE_WINDOW_DAYS
             days_left = (r.install_date + timedelta(days=window_days) - date.today()).days
             last_event_time = r.last_event_time
@@ -508,7 +529,7 @@ def check_mergecoins_eligibility(player_id: str) -> Optional[dict]:
                 last_event_time = last_event_time.replace(tzinfo=timezone.utc)
             days_since_active = (datetime.now(timezone.utc) - last_event_time).days
             if days_left <= MERGECOINS_MAX_DAYS_LEFT_IN_WINDOW and days_since_active <= MERGECOINS_MIN_RECENT_ACTIVITY_DAYS:
-                result = {"eligible": True, "source": r.source}
+                result = {"eligible": True, "source": source}
     except Exception as e:
         # WHY fail closed to None rather than raise: a lookup failure must fall through to the
         # existing Offer-1-style eligibility path, never block or 500 a signup outright.
