@@ -2488,12 +2488,25 @@ def _log_seen_recently(substr, minutes):
         start = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
         flt = ('resource.type="cloud_run_revision" AND resource.labels.service_name="mergecash-api" '
                f'AND textPayload:"{substr}" AND timestamp>="{start}"')
-        r = http_requests.post("https://logging.googleapis.com/v2/entries:list",
-            headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
-            json={"resourceNames": [f"projects/{PROJECT_ID}"], "filter": flt, "pageSize": 1}, timeout=15)
-        if r.status_code >= 300:
-            return None
-        return len(r.json().get("entries", [])) > 0
+        # WHY: entries:list may return an EMPTY page plus a nextPageToken while it is still
+        # scanning. Reading that as "none seen" fired false "monitor DOWN" / "scheduler hasn't
+        # run" alerts on 2026-10-26 while both jobs were logging fine. Only a page with no
+        # token is a real "none"; if we run out of pages first, report unknown (None).
+        body = {"resourceNames": [f"projects/{PROJECT_ID}"], "filter": flt,
+                "orderBy": "timestamp desc", "pageSize": 1}
+        for _ in range(5):
+            r = http_requests.post("https://logging.googleapis.com/v2/entries:list",
+                headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
+                json=body, timeout=15)
+            if r.status_code >= 300:
+                return None
+            data = r.json()
+            if data.get("entries"):
+                return True
+            if not data.get("nextPageToken"):
+                return False
+            body["pageToken"] = data["nextPageToken"]
+        return None
     except Exception:
         return None
 
