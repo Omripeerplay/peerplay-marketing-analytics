@@ -2677,6 +2677,24 @@ def mergecash_health(request: Request):
         if err_count > 0:
             problems.append(f":x: *{err_count} ERROR log(s)* in the last 70m:{err_info}")
 
+    # Check 2b — event-log writes to BigQuery failing.
+    # WHY match on text, not severity: log_event() reports failures with logger.warning, and Cloud
+    # Run stores these plain-text stderr lines with NO severity, so Check 2 (severity>=ERROR) can never
+    # see them. That is how a lost write permission ran silently 2026-08-31 → 2026-11-03 (MC1-897).
+    write_fail = None
+    for marker in ("Event log failed", "Event log error"):
+        seen = _log_seen_recently(marker, 70)
+        if seen:
+            write_fail = True
+            break
+        if seen is False and write_fail is None:
+            write_fail = False
+    metrics["event_log_write_failed_70m"] = write_fail
+    if write_fail:
+        problems.append(":floppy_disk: *Event logging to BigQuery is failing* — `mergecash_events` "
+                        "writes were rejected in the last 70m (signups / fraud / rewards not recorded). "
+                        "Search mergecash-api logs for \"Event log failed\".")
+
     # Check 3 — completion pipeline sanity (mostly no-op until completions start)
     try:
         metrics["completions_last_3h"] = list(bq_query(f"""
