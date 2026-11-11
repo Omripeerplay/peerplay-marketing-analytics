@@ -2488,12 +2488,25 @@ def _log_seen_recently(substr, minutes):
         start = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
         flt = ('resource.type="cloud_run_revision" AND resource.labels.service_name="mergecash-api" '
                f'AND textPayload:"{substr}" AND timestamp>="{start}"')
-        r = http_requests.post("https://logging.googleapis.com/v2/entries:list",
-            headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
-            json={"resourceNames": [f"projects/{PROJECT_ID}"], "filter": flt, "pageSize": 1}, timeout=15)
-        if r.status_code >= 300:
-            return None
-        return len(r.json().get("entries", [])) > 0
+        # WHY: entries:list may return an EMPTY page plus a nextPageToken while it is still
+        # scanning. Reading that as "none seen" fired false "monitor DOWN" / "scheduler hasn't
+        # run" alerts on 2026-10-26 while both jobs were logging fine. Only a page with no
+        # token is a real "none"; if we run out of pages first, report unknown (None).
+        body = {"resourceNames": [f"projects/{PROJECT_ID}"], "filter": flt,
+                "orderBy": "timestamp desc", "pageSize": 1}
+        for _ in range(5):
+            r = http_requests.post("https://logging.googleapis.com/v2/entries:list",
+                headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
+                json=body, timeout=15)
+            if r.status_code >= 300:
+                return None
+            data = r.json()
+            if data.get("entries"):
+                return True
+            if not data.get("nextPageToken"):
+                return False
+            body["pageToken"] = data["nextPageToken"]
+        return None
     except Exception:
         return None
 
@@ -2663,6 +2676,24 @@ def mergecash_health(request: Request):
         metrics["error_logs"] = err_count
         if err_count > 0:
             problems.append(f":x: *{err_count} ERROR log(s)* in the last 70m:{err_info}")
+
+    # Check 2b — event-log writes to BigQuery failing.
+    # WHY match on text, not severity: log_event() reports failures with logger.warning, and Cloud
+    # Run stores these plain-text stderr lines with NO severity, so Check 2 (severity>=ERROR) can never
+    # see them. That is how a lost write permission ran silently 2026-08-31 → 2026-11-03 (MC1-897).
+    write_fail = None
+    for marker in ("Event log failed", "Event log error"):
+        seen = _log_seen_recently(marker, 70)
+        if seen:
+            write_fail = True
+            break
+        if seen is False and write_fail is None:
+            write_fail = False
+    metrics["event_log_write_failed_70m"] = write_fail
+    if write_fail:
+        problems.append(":floppy_disk: *Event logging to BigQuery is failing* — `mergecash_events` "
+                        "writes were rejected in the last 70m (signups / fraud / rewards not recorded). "
+                        "Search mergecash-api logs for \"Event log failed\".")
 
     # Check 3 — completion pipeline sanity (mostly no-op until completions start)
     try:
